@@ -6,7 +6,7 @@ import pandas as pd
 import joblib
 import streamlit as st
 
-# Silence sklearn version mismatch warnings (optional)
+# (Optional) silence sklearn pickle-version warnings
 try:
     import warnings
     from sklearn.exceptions import InconsistentVersionWarning
@@ -14,7 +14,7 @@ try:
 except Exception:
     pass
 
-# Optional imports for URL mode (if missing, we'll handle gracefully)
+# Optional imports for URL mode (handled gracefully if missing)
 try:
     import requests
     from bs4 import BeautifulSoup
@@ -28,30 +28,30 @@ try:
 except Exception:
     TextBlob = None
 
+# ------------------ Paths ------------------
 MODEL_XGB_PATH = "model_xgb_smote_best.joblib"
-MODEL_RF_PATH  = "model_random_forest_balanced.joblib"
-MODEL_LR_PATH  = "model_logreg_balanced.joblib"
+MODEL_RF_PATH  = "model_random_forest_balanced.joblib"        # optional
+MODEL_LR_PATH  = "model_logreg_balanced.joblib"               # optional
 
 COLS_PATH  = "feature_columns.json"
 MEAN_PATH  = "feature_means.json"
-DATASET    = "OnlineNewsPopularity.csv"
+DATASET    = "OnlineNewsPopularity.csv"                       # optional for Dataset Row mode
 
 # bump this if you change code and want Streamlit to reload cached resources
-CACHE_BUSTER = "v3"
+CACHE_BUSTER = "v4"
 
+# ------------------ App Header ------------------
 st.set_page_config(page_title="News Popularity Predictor", page_icon="📰", layout="wide")
 st.title("📰 News Popularity Predictor")
 st.caption("XGBoost (SMOTE, tuned) + optional RandomForest / LogisticRegression if present")
 
-# ---------- Load artifacts ----------
+# ------------------ Load artifacts ------------------
 @st.cache_resource(show_spinner=False)
 def load_artifacts(cache_buster="v1"):
-    # Core artifacts
     model_xgb = joblib.load(MODEL_XGB_PATH)
     with open(COLS_PATH) as f: feature_columns = json.load(f)
     with open(MEAN_PATH) as f: feature_means = json.load(f)
 
-    # Optional models (load if files exist)
     model_rf = joblib.load(MODEL_RF_PATH) if os.path.exists(MODEL_RF_PATH) else None
     model_lr = joblib.load(MODEL_LR_PATH) if os.path.exists(MODEL_LR_PATH) else None
 
@@ -63,6 +63,7 @@ def load_artifacts(cache_buster="v1"):
 
 MODELS, FEATURE_COLUMNS, FEATURE_MEANS = load_artifacts(cache_buster=CACHE_BUSTER)
 
+# ------------------ CSV sanitizer ------------------
 def sanitize_df(df_raw: pd.DataFrame) -> pd.DataFrame:
     """
     Align incoming DF to model columns; drop url/timedelta/popular/shares;
@@ -70,33 +71,34 @@ def sanitize_df(df_raw: pd.DataFrame) -> pd.DataFrame:
     """
     df = df_raw.copy()
 
-    # 1) Normalize headers so they match FEATURE_COLUMNS
+    # Normalize headers so they match FEATURE_COLUMNS exactly
     df.columns = [str(c).strip() for c in df.columns]
     df = df.loc[:, ~df.columns.duplicated(keep="first")]
 
-    # 2) Drop known non-feature columns
+    # Drop known non-feature columns
     drop_cols = [c for c in df.columns if c.lower() in {"url","timedelta","popular","shares"}]
     df = df.drop(columns=drop_cols, errors="ignore")
 
-    # 3) Ensure all expected columns exist (create missing as NaN)
+    # Ensure all expected columns exist (create missing as NaN)
     for col in FEATURE_COLUMNS:
         if col not in df.columns:
             df[col] = np.nan
 
-    # 4) Reorder to FEATURE_COLUMNS exactly
+    # Reorder to FEATURE_COLUMNS exactly
     df = df[FEATURE_COLUMNS]
 
-    # 5) Coerce to numeric then fill NaNs with means (preserves real values)
+    # Coerce to numeric then fill NaNs with means (preserves real values)
     for col in FEATURE_COLUMNS:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     df = df.fillna(pd.Series(FEATURE_MEANS))
 
     return df
 
+# ------------------ Prediction helper ------------------
 def predict_with_model(model, X: pd.DataFrame):
-    """Return pred (0/1) and proba for POPULAR class if model supports it."""
+    """Return (pred, proba) where proba is P(popular=1)."""
     if hasattr(model, "predict_proba"):
-        proba = model.predict_proba(X)[:,1]
+        proba = model.predict_proba(X)[:, 1]
     elif hasattr(model, "decision_function"):
         s = model.decision_function(X)
         proba = 1 / (1 + np.exp(-s))
@@ -105,7 +107,7 @@ def predict_with_model(model, X: pd.DataFrame):
     pred = (proba >= 0.5).astype(int)
     return pred, proba
 
-# ---------- Feature importance helpers ----------
+# ------------------ Feature importance helpers ------------------
 def xgb_gain_importances_series(model, feature_columns):
     try:
         booster = model.get_booster()
@@ -157,23 +159,39 @@ def lr_abs_coef_series(model, feature_columns):
         pass
     return pd.Series(dtype="float64")
 
-# ---------- URL feature extraction (beta) ----------
-BASIC_STOPWORDS = {"a","an","the","and","or","but","if","while","of","to","in","on","for","by","with",
-                   "is","are","was","were","be","been","being","it","its","as","at","from","that","this",
-                   "these","those","we","you","he","she","they","them","his","her","their","our","i","me",
-                   "my","mine","your","yours"}
+# ------------------ URL feature extraction ------------------
+BASIC_STOPWORDS = {
+    "a","an","the","and","or","but","if","while","of","to","in","on","for","by","with",
+    "is","are","was","were","be","been","being","it","its","as","at","from","that","this","these","those",
+    "we","you","he","she","they","them","his","her","their","our","i","me","my","mine","your","yours"
+}
 
 def _tokenize(text: str):
     import re as _re
-    return _re.findall(r"\\b\\w+\\b", (text or "").lower())
+    return _re.findall(r"\b\w+\b", (text or "").lower())
 
 def _count_nonstop(tokens):
     return sum(1 for t in tokens if t not in BASIC_STOPWORDS)
 
+# Choose BeautifulSoup parser: prefer lxml if present, else stdlib html.parser
+def _choose_bs_parser():
+    forced = os.getenv("BS_PARSER")
+    if forced:
+        return forced
+    try:
+        import lxml  # noqa: F401
+        return "lxml"
+    except Exception:
+        return "html.parser"
+
 def _get_week_flags(date_obj):
     name_map = {
-        0: "weekday_is_monday", 1: "weekday_is_tuesday", 2: "weekday_is_wednesday",
-        3: "weekday_is_thursday", 4: "weekday_is_friday", 5: "weekday_is_saturday",
+        0: "weekday_is_monday",
+        1: "weekday_is_tuesday",
+        2: "weekday_is_wednesday",
+        3: "weekday_is_thursday",
+        4: "weekday_is_friday",
+        5: "weekday_is_saturday",
         6: "weekday_is_sunday",
     }
     flags = {}
@@ -182,7 +200,7 @@ def _get_week_flags(date_obj):
         if col in FEATURE_COLUMNS:
             flags[col] = 1 if wd == i else 0
     if "is_weekend" in FEATURE_COLUMNS:
-        flags["is_weekend"] = 1 if wd in (5,6) else 0
+        flags["is_weekend"] = 1 if wd in (5, 6) else 0
     return flags
 
 def _guess_channel_flags(url, title, text):
@@ -210,7 +228,7 @@ def extract_features_from_url(url: str):
     r = requests.get(url, timeout=30)
     r.raise_for_status()
     html = r.text
-    soup = BeautifulSoup(html, "lxml")
+    soup = BeautifulSoup(html, _choose_bs_parser())
 
     title = (soup.title.string or "").strip() if soup.title else ""
     og_title = soup.find("meta", property="og:title")
@@ -240,7 +258,9 @@ def extract_features_from_url(url: str):
     num_self_hrefs = sum(1 for a in anchors if a.get("href") and urlparse(a.get("href")).netloc == domain)
 
     num_imgs = len(soup.find_all("img"))
-    num_videos = len(soup.find_all("video")) + sum(1 for f in soup.find_all("iframe") if f.get("src") and any(k in f["src"].lower() for k in ["youtube","vimeo"]))
+    num_videos = len(soup.find_all("video")) + sum(
+        1 for f in soup.find_all("iframe") if f.get("src") and any(k in f["src"].lower() for k in ["youtube","vimeo"])
+    )
 
     # Sentiment proxies (optional)
     if TextBlob is not None and text:
@@ -295,18 +315,25 @@ def extract_features_from_url(url: str):
     if "title_density" in row:
         row["title_density"] = (n_tokens_title / max(1, n_tokens_content)) if n_tokens_content else 0.0
 
-    for k,v in {**week_flags, **channel_flags}.items():
+    for k, v in {**week_flags, **channel_flags}.items():
         if k in row: row[k] = v
 
     X_new = pd.DataFrame([[row[c] for c in FEATURE_COLUMNS]], columns=FEATURE_COLUMNS)
-    meta = {"title": title[:160], "pub_date": str(pub_dt), "url": url,
-            "tokens_title": n_tokens_title, "tokens_content": n_tokens_content,
-            "num_imgs": num_imgs, "num_videos": num_videos, "num_hrefs": num_hrefs}
+    meta = {
+        "title": title[:160],
+        "pub_date": str(pub_dt),
+        "url": url,
+        "tokens_title": n_tokens_title,
+        "tokens_content": n_tokens_content,
+        "num_imgs": num_imgs,
+        "num_videos": num_videos,
+        "num_hrefs": num_hrefs,
+    }
     return X_new, meta
 
-# ---------- UI ----------
+# ------------------ UI ------------------
 with st.sidebar:
-    mode = st.radio("Input mode", ["Dataset Row", "Upload CSV", "Predict from URL"], index=0)
+    mode = st.radio("Input mode", ["Dataset Row", "Upload CSV", "Predict from URL (beta)"], index=0)
     model_names = list(MODELS.keys())
     compare_all = st.checkbox("Compare all available models", value=False)
     if not compare_all:
@@ -314,6 +341,7 @@ with st.sidebar:
     else:
         chosen_model_name = None
     st.markdown("---")
+    st.caption("Tip: For URL mode, install dependencies:  pip install beautifulsoup4 textblob requests")
 
 # --- Dataset Row mode ---
 if mode == "Dataset Row":
@@ -339,13 +367,19 @@ if mode == "Dataset Row":
 
             if "XGBoost" in chosen_model_name:
                 imp = xgb_gain_importances_series(mdl, FEATURE_COLUMNS).sort_values(ascending=False).head(15)
-                if not imp.empty: st.write("**Top global features:**"); st.bar_chart(imp)
+                if not imp.empty:
+                    st.write("**Top global features:**")
+                    st.bar_chart(imp)
             elif "Random Forest" in chosen_model_name:
                 imp = rf_importances_series(mdl, FEATURE_COLUMNS).sort_values(ascending=False).head(15)
-                if not imp.empty: st.write("**Top global features:**"); st.bar_chart(imp)
+                if not imp.empty:
+                    st.write("**Top global features:**")
+                    st.bar_chart(imp)
             else:
                 imp = lr_abs_coef_series(mdl, FEATURE_COLUMNS).sort_values(ascending=False).head(15)
-                if not imp.empty: st.write("**Top |coef| (LogReg):**"); st.bar_chart(imp)
+                if not imp.empty:
+                    st.write("**Top |coef| (LogReg):**")
+                    st.bar_chart(imp)
     else:
         st.warning(f"Dataset '{DATASET}' not found. Use 'Upload CSV' or place it next to app.py.")
 
@@ -383,7 +417,7 @@ elif mode == "Upload CSV":
 
 # --- Predict from URL mode ---
 else:
-    st.subheader("Predict from a public article URL")
+    st.subheader("Predict from a public article URL (beta)")
     url = st.text_input("Article URL", placeholder="https://example.com/some-article")
     if st.button("Fetch & Predict") and url:
         try:
@@ -404,14 +438,20 @@ else:
 
                 if "XGBoost" in chosen_model_name:
                     imp = xgb_gain_importances_series(mdl, FEATURE_COLUMNS).sort_values(ascending=False).head(15)
-                    if not imp.empty: st.write("**Top global features:**"); st.bar_chart(imp)
+                    if not imp.empty:
+                        st.write("**Top global features:**")
+                        st.bar_chart(imp)
                 elif "Random Forest" in chosen_model_name:
                     imp = rf_importances_series(mdl, FEATURE_COLUMNS).sort_values(ascending=False).head(15)
-                    if not imp.empty: st.write("**Top global features:**"); st.bar_chart(imp)
+                    if not imp.empty:
+                        st.write("**Top global features:**")
+                        st.bar_chart(imp)
                 else:
                     imp = lr_abs_coef_series(mdl, FEATURE_COLUMNS).sort_values(ascending=False).head(15)
-                    if not imp.empty: st.write("**Top |coef| (LogReg):**"); st.bar_chart(imp)
+                    if not imp.empty:
+                        st.write("**Top |coef| (LogReg):**")
+                        st.bar_chart(imp)
         except Exception as e:
             st.error(f"Failed to extract/predict from URL: {e}")
             if requests is None or BeautifulSoup is None:
-                st.info("Install dependencies:  pip install beautifulsoup4 lxml textblob")
+                st.info("Install dependencies:  pip install beautifulsoup4 textblob requests")
