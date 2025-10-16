@@ -4,7 +4,6 @@ numpy==1.26.4
 scikit-learn==1.6.1
 xgboost==2.1.1
 beautifulsoup4==4.12.3
-lxml==5.2.1
 textblob==0.18.0.post0
 joblib==1.4.2
 requests==2.32.3
