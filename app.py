@@ -333,7 +333,7 @@ def extract_features_from_url(url: str):
 
 # ------------------ UI ------------------
 with st.sidebar:
-    mode = st.radio("Input mode", ["Dataset Row", "Upload CSV", "Predict from URL (beta)"], index=0)
+    mode = st.radio("Input mode", ["Dataset Row", "Upload CSV", "Predict from URL"], index=0)
     model_names = list(MODELS.keys())
     compare_all = st.checkbox("Compare all available models", value=False)
     if not compare_all:
@@ -417,7 +417,7 @@ elif mode == "Upload CSV":
 
 # --- Predict from URL mode ---
 else:
-    st.subheader("Predict from a public article URL (beta)")
+    st.subheader("Predict from a public article URL")
     url = st.text_input("Article URL", placeholder="https://example.com/some-article")
     if st.button("Fetch & Predict") and url:
         try:
