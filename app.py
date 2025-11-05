@@ -43,7 +43,7 @@ CACHE_BUSTER = "v4"
 # ------------------ App Header ------------------
 st.set_page_config(page_title="News Popularity Predictor", page_icon="📰", layout="wide")
 st.title("📰 News Popularity Predictor")
-st.caption("XGBoost (SMOTE, tuned) + optional RandomForest / LogisticRegression if present")
+st.caption("XGBoost (SMOTE) + optional RandomForest / LogisticRegression if present")
 
 # ------------------ Load artifacts ------------------
 @st.cache_resource(show_spinner=False)
@@ -55,8 +55,8 @@ def load_artifacts(cache_buster="v1"):
     model_rf = joblib.load(MODEL_RF_PATH) if os.path.exists(MODEL_RF_PATH) else None
     model_lr = joblib.load(MODEL_LR_PATH) if os.path.exists(MODEL_LR_PATH) else None
 
-    models = {"XGBoost (SMOTE, tuned)": model_xgb}
-    if model_rf is not None: models["Random Forest (balanced)"] = model_rf
+    models = {"XGBoost (SMOTE)": model_xgb}
+    if model_rf is not None: models["Random Forest"] = model_rf
     if model_lr is not None: models["Logistic Regression (balanced)"] = model_lr
 
     return models, feature_columns, feature_means
